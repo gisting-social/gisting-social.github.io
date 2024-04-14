@@ -88,7 +88,7 @@ export function firehoseThreads() {
       }
 
       /**
-       * @param {import('../../coldsky/lib/firehose').FirehoseMessageOfType<'app.bsky.feed.like'>} msg 
+       * @param {import('../../coldsky/lib/firehose').FirehoseRecord$Typed<'app.bsky.feed.like'>} msg 
        */
       async function handleLike(msg) {
         storeLikeToCache(msg.repo, msg.subject?.uri, new Date(msg.createdAt).getTime());
@@ -99,7 +99,7 @@ export function firehoseThreads() {
       }
 
       /**
-       * @param {import('../../coldsky/lib/firehose').FirehoseMessageOfType<'app.bsky.feed.post'>} msg 
+       * @param {import('../../coldsky/lib/firehose').FirehoseRecord$Typed<'app.bsky.feed.post'>} msg 
        */
       async function handlePost(msg) {
         const thread = await getPostThreadCached('at://' + msg.repo + '/' + msg.path);
@@ -108,7 +108,7 @@ export function firehoseThreads() {
       }
 
       /**
-       * @param {import('../../coldsky/lib/firehose').FirehoseMessageOfType<'app.bsky.feed.repost'>} msg 
+       * @param {import('../../coldsky/lib/firehose').FirehoseRecord$Typed<'app.bsky.feed.repost'>} msg 
        */
       async function handleRepost(msg) {
         storeRepostToCache(msg.repo, msg.subject?.uri, new Date(msg.createdAt).getTime());

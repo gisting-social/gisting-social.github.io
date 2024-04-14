@@ -3,8 +3,9 @@
 import Dexie from 'dexie';
 import { ColdskyAgent, likelyDID, shortenDID, shortenHandle, unwrapShortDID, unwrapShortHandle } from '../../coldsky/lib';
 import { BSKY_PUBLIC_URL } from '../../coldsky/lib/coldsky-agent';
-import { streamBuffer } from '../../coldsky/src/api/akpa';
+import { firstUntilSecond, streamBuffer } from '../../coldsky/src/api/akpa';
 import Fuse from 'fuse.js';
+import { CancelScheduleSendSharp } from '@mui/icons-material';
 
 /**
  * @typedef {{
@@ -44,9 +45,9 @@ import Fuse from 'fuse.js';
 /** @typedef {import ('@atproto/api/dist/client/types/app/bsky/actor/defs').ProfileViewBasic} ProfileViewBasic */
 /** @typedef {import ('@atproto/api/dist/client/types/app/bsky/actor/defs').ProfileViewDetailed} ProfileViewDetailed */
 
-/** @typedef {import('../../coldsky/lib/firehose').FirehoseMessageRecordTypes['app.bsky.feed.like']} LikeRecord */
-/** @typedef {import('../../coldsky/lib/firehose').FirehoseMessageRecordTypes['app.bsky.feed.post']} PostRecord */
-/** @typedef {import('../../coldsky/lib/firehose').FirehoseMessageRecordTypes['app.bsky.feed.repost']} RepostRecord */
+/** @typedef {import('../../coldsky/lib/firehose').RepoRecord$Typed['app.bsky.feed.like']} LikeRecord */
+/** @typedef {import('../../coldsky/lib/firehose').RepoRecord$Typed['app.bsky.feed.post']} PostRecord */
+/** @typedef {import('../../coldsky/lib/firehose').RepoRecord$Typed['app.bsky.feed.repost']} RepostRecord */
 
 const db = /**
  * @type {Dexie & {
@@ -66,6 +67,8 @@ db.version(9).stores({
 const publicAgent = new ColdskyAgent({
   service: BSKY_PUBLIC_URL
 });
+
+// #region profiles
 
 /**
  * @returns {AsyncIterable<ProfileViewDetailed>}
@@ -170,6 +173,11 @@ async function resolvePlcDirectly(did) {
   return entries;
 }
 
+// #endregion
+
+
+// #region accounts
+
 /**
  * @param {string} text
  */
@@ -254,7 +262,7 @@ export function searchAccounts(text) {
         }
 
         if (anyNew) {
-          sortResultsByText(results, text, words);
+          sortProfilesSearchByText(results, text, words);
         }
 
         streaming.yield(results, buf => buf ? buf.concat(results) : results);
@@ -304,6 +312,147 @@ export function storeAccountToCache(account) {
   clearTimeout(debounceAccountsToStoreInCache);
   debounceAccountsToStoreInCache = /** @type {*} */(setTimeout(cacheAccountsNow, 300));
 }
+
+
+function cacheAccountsNow() {
+  clearTimeout(maxDebounceAccountsToStoreInCache);
+  maxDebounceAccountsToStoreInCache = 0;
+  clearTimeout(debounceAccountsToStoreInCache);
+  debounceAccountsToStoreInCache = 0;
+
+  const accounts = Array.from(accountsToStoreInCacheByShortDID.values())
+    .map(ac => {
+      const wordLeads = [];
+      for (const w of breakIntoWords(ac.displayName + ' ' + ac.handle + ' ' + ac.description)) {
+        const wLead = w.slice(0, 3).toLowerCase();
+        if (wordLeads.indexOf(wLead) < 0)
+          wordLeads.push(wLead);
+      }
+      ac.w = wordLeads;
+      return ac;
+    });
+
+  accountsToStoreInCacheByShortDID.clear();
+
+  if (accounts.length) {
+    db.accounts.bulkPut(accounts);
+
+    console.log('adding accounts ', accounts.length, ' to cache ', accounts);
+  }
+}
+
+/**
+ * @param {string} text
+ */
+function searchAccountsFromCache(text) {
+  const wordLeads = populateWordLeads(text, []);
+
+  return wordLeads.map(async wLead => {
+    const dbMatches = await db.accounts.where('w').equals(wLead).toArray();
+    return dbMatches;
+  });
+}
+
+/**
+ * @param {ProfileView[]} results
+ * @param {string} text
+ * @param {string[]} words
+ */
+function sortProfilesSearchByText(results, text, words) {
+  const resultsWithHandleJoin = results.map(r => {
+    const withHandleJoin = { ...r, handlejoin: (r.handle || '').replace(/[^\w\d]+/g, '').toLowerCase() };
+    return withHandleJoin;
+  });
+
+  const fuseKeyFields = new Fuse(resultsWithHandleJoin, {
+    keys: ['handle', 'displayName', 'description', 'handlejoin'],
+    findAllMatches: true,
+    includeScore: true
+  });
+
+  const fuseAll = new Fuse(results, {
+    keys: ['handle', 'displayName', 'description'],
+    findAllMatches: true,
+    includeScore: true
+  });
+
+  const keyFieldsResults = fuseKeyFields.search(text);
+  const allResults = fuseAll.search(text);
+
+  /** @type {Record<string, number>} */
+  const keyRankByShortDID = {};
+
+  for (const bestResult of keyFieldsResults) {
+    if (bestResult.score) {
+      const shortDID = shortenDID(bestResult.item.did);
+      keyRankByShortDID[shortDID] = bestResult.score;
+    }
+  }
+
+  /** @type {Record<string, number>} */
+  const secondaryRankByShortDID = {};
+  for (const bestResult of allResults) {
+    if (bestResult.score) {
+      const shortDID = shortenDID(bestResult.item.did);
+      secondaryRankByShortDID[shortDID] = bestResult.score;
+    }
+  }
+
+  results.sort((p1, p2) => {
+    const shortDID1 = shortenDID(p1.did);
+    const shortDID2 = shortenDID(p2.did);
+
+    const keyRank1 = keyRankByShortDID[shortDID1];
+    const keyRank2 = keyRankByShortDID[shortDID2];
+
+    if (keyRank1 >= 0 && keyRank2 >= 0) {
+      if (keyRank1 !== keyRank2) return keyRank1 - keyRank2;
+    }
+
+    const secondaryRank1 = secondaryRankByShortDID[shortDID1];
+    const secondaryRank2 = secondaryRankByShortDID[shortDID2];
+
+    if (secondaryRank1 >= 0 && secondaryRank2 >= 0) {
+      if (secondaryRank1 !== secondaryRank2) return secondaryRank1 - secondaryRank2;
+    }
+
+    const hasRank1 = keyRank1 >= 0 || secondaryRank1 >= 0;
+    const hasRank2 = keyRank2 >= 0 || secondaryRank2 >= 0;
+
+    return (hasRank1 ? 0 : 1) - (hasRank2 ? 0 : 1);
+  });
+}
+
+/**
+ * @param {string} searchText
+ */
+async function directSearchAccountsTypeahead(searchText) {
+
+  const result = (await publicAgent.searchActorsTypeahead({
+    q: searchText,
+    limit: 100
+  })).data?.actors;
+
+  return result;
+}
+
+/**
+ * @param {string} searchText
+ * @param {number} [limit]
+ */
+async function directSearchAccountsFull(searchText, limit) {
+
+  const result = (await publicAgent.searchActors({
+    q: searchText,
+    limit: limit || 100
+  })).data?.actors;
+
+  return result;
+}
+
+// #endregion
+
+// #region posts
 
 /**
  * @type {Map<string, import('@atproto/api/dist/client/types/app/bsky/feed/defs').PostView>}
@@ -483,174 +632,60 @@ function collectPostText(post, textArray) {
   return textArray;
 }
 
-function cacheAccountsNow() {
-  clearTimeout(maxDebounceAccountsToStoreInCache);
-  maxDebounceAccountsToStoreInCache = 0;
-  clearTimeout(debounceAccountsToStoreInCache);
-  debounceAccountsToStoreInCache = 0;
+// #endregion
 
-  const accounts = Array.from(accountsToStoreInCacheByShortDID.values())
-    .map(ac => {
-      const wordLeads = [];
-      for (const w of breakIntoWords(ac.displayName + ' ' + ac.handle + ' ' + ac.description)) {
-        const wLead = w.slice(0, 3).toLowerCase();
-        if (wordLeads.indexOf(wLead) < 0)
-          wordLeads.push(wLead);
-      }
-      ac.w = wordLeads;
-      return ac;
-    });
-
-  accountsToStoreInCacheByShortDID.clear();
-
-  if (accounts.length) {
-    db.accounts.bulkPut(accounts);
-
-    console.log('adding accounts ', accounts.length, ' to cache ', accounts);
-  }
-}
+// #region getThread
 
 /**
- * @param {string} text
+ * @param {string} uri
  */
-function searchAccountsFromCache(text) {
-  const wordLeads = populateWordLeads(text, []);
+export async function* getPostThread(uri) {
+  const cachedAnchorPost = await db.records.where('uri').equals(uri).first();
+  if (cachedAnchorPost) {
+    const cachedRoot =
+      !cachedAnchorPost.thread || cachedAnchorPost.thread === cachedAnchorPost.uri ? cachedAnchorPost :
+        await db.records.where('uri').equals(cachedAnchorPost.thread).first();
 
-  return wordLeads.map(async wLead => {
-    const dbMatches = await db.accounts.where('w').equals(wLead).toArray();
-    return dbMatches;
-  });
-}
-
-/**
- * @param {ProfileView[]} results
- * @param {string} text
- * @param {string[]} words
- */
-function sortResultsByText(results, text, words) {
-  const resultsWithHandleJoin = results.map(r => {
-    const withHandleJoin = { ...r, handlejoin: (r.handle || '').replace(/[^\w\d]+/g, '').toLowerCase() };
-    return withHandleJoin;
-  });
-
-  const fuseKeyFields = new Fuse(resultsWithHandleJoin, {
-    keys: ['handle', 'displayName', 'description', 'handlejoin'],
-    findAllMatches: true,
-    includeScore: true
-  });
-
-  const fuseAll = new Fuse(results, {
-    keys: ['handle', 'displayName', 'description'],
-    findAllMatches: true,
-    includeScore: true
-  });
-
-  const keyFieldsResults = fuseKeyFields.search(text);
-  const allResults = fuseAll.search(text);
-
-  /** @type {Record<string, number>} */
-  const keyRankByShortDID = {};
-
-  for (const bestResult of keyFieldsResults) {
-    if (bestResult.score) {
-      const shortDID = shortenDID(bestResult.item.did);
-      keyRankByShortDID[shortDID] = bestResult.score;
+    if (cachedRoot) {
+      yield* firstUntilSecond(
+        getCachedThread(cachedRoot, cachedAnchorPost),
+        getThreadFromPublicAgent(cachedRoot?.uri));
+      return;
     }
   }
 
-  /** @type {Record<string, number>} */
-  const secondaryRankByShortDID = {};
-  for (const bestResult of allResults) {
-    if (bestResult.score) {
-      const shortDID = shortenDID(bestResult.item.did);
-      secondaryRankByShortDID[shortDID] = bestResult.score;
-    }
-  }
+  yield* getThreadFromPublicAgent(uri);
 
-  results.sort((p1, p2) => {
-    const shortDID1 = shortenDID(p1.did);
-    const shortDID2 = shortenDID(p2.did);
+  /**
+   * @param {HistoryPostRecord} cachedRoot
+   * @param {HistoryPostRecord} cachedAnchorPost
+   * @returns {AsyncIterable<import('./firehose-threads').ThreadViewPost>}
+   */
+  async function* getCachedThread(cachedRoot, cachedAnchorPost) {
+    const rootAuthorAsync = resolveHandleOrDIDToProfile(cachedRoot.did);
+    const anchorAuthorAsync = cachedAnchorPost.did === cachedRoot.did ?
+      rootAuthorAsync :
+      resolveHandleOrDIDToProfile(cachedAnchorPost.did);
 
-    const keyRank1 = keyRankByShortDID[shortDID1];
-    const keyRank2 = keyRankByShortDID[shortDID2];
-
-    if (keyRank1 >=0 && keyRank2 >= 0) {
-      if (keyRank1 !== keyRank2) return keyRank1 - keyRank2;
+    if (cachedRoot === cachedAnchorPost) {
+      // TODO: retrieve authors and yield the simple thread of 2
     }
 
-    const secondaryRank1 = secondaryRankByShortDID[shortDID1];
-    const secondaryRank2 = secondaryRankByShortDID[shortDID2];
-
-    if (secondaryRank1 >=0 && secondaryRank2 >= 0) {
-      if (secondaryRank1 !== secondaryRank2) return secondaryRank1 - secondaryRank2;
-    }
-
-    const hasRank1 = keyRank1 >= 0 || secondaryRank1 >= 0;
-    const hasRank2 = keyRank2 >= 0 || secondaryRank2 >= 0;
-
-    return (hasRank1 ? 0 : 1) - (hasRank2 ? 0 : 1);
-  });
-}
-
-const NOT_WORD_CHARACTERS_REGEX = /[^\w\d]+/g;
-
-/**
- * @param {string} text
- */
-function breakIntoWords(text) {
-  const words = text.split(NOT_WORD_CHARACTERS_REGEX);
-  const result = [];
-  for (const word of words) {
-    if (word.length >=3 && word !== text) result.push(word);
-  }
-  return result;
-}
-
-/**
- * @param {string} searchText
- */
-async function directSearchAccountsTypeahead(searchText) {
-
-  const result = (await publicAgent.searchActorsTypeahead({
-    q: searchText,
-    limit: 100
-  })).data?.actors;
-
-  return result;
-}
-
-/**
- * @param {string} searchText
- * @param {number} [limit]
- */
-async function directSearchAccountsFull(searchText, limit) {
-
-  const result = (await publicAgent.searchActors({
-    q: searchText,
-    limit: limit || 100
-  })).data?.actors;
-
-  return result;
-}
-
-/**
- * @param {string | null | undefined} text
- * @param {string[]} result
- */
-export function populateWordLeads(text, result) {
-  if (!text) return result;
-
-  const words = text.split(NOT_WORD_CHARACTERS_REGEX);
-  for (const word of words) {
-    if (word.length < 3) continue;
-
-    const wLead = word.slice(0, 3).toLowerCase();
-    if (result.indexOf(wLead) < 0)
-      result.push(wLead);
   }
 
-  return result;
+  /**
+   * @param {string} uri
+   * @returns {AsyncIterable<import('./firehose-threads').ThreadViewPost>}
+   */
+  async function* getThreadFromPublicAgent(uri) {
+  }
+
 }
+
+// #endregion
+
+
+// #region repo history
 
 const allHistoryRecordTypes = /** @type {const} */(['app.bsky.feed.like', 'app.bsky.feed.post', 'app.bsky.feed.repost']);
 
@@ -856,14 +891,14 @@ function getProfileHistoryViaListRecords(shortDID, earliest) {
               r => {
                 const rec = r.value;
                 rec.uri = r.uri;
-                storePostIndexToCache({
+                storePostIndexToCache(/** @type {import('@atproto/api/dist/client/types/app/bsky/feed/defs').PostView} */({
                   uri: rec.uri,
                   record: rec,
-                  author: {
+                  author: /** @type {ProfileView} */({
                     did: rec.repo
-                  },
+                  }),
                   indexedAt: rec.createdAt
-                });
+                }));
                 return rec;
               } :
               r => r.value);
@@ -871,7 +906,7 @@ function getProfileHistoryViaListRecords(shortDID, earliest) {
         }
 
         /**
-         * @param {import('../../coldsky/lib/firehose').FirehoseMessageOfType<recordType>[]} chunk 
+         * @param {import('../../coldsky/lib/firehose').FirehoseRecord$Typed<recordType>[]} chunk 
          */
         function yieldRecords(chunk) {
           let earliestTime;
@@ -903,6 +938,8 @@ function getProfileHistoryViaListRecords(shortDID, earliest) {
     });
 }
 
+// #endregion
+
 async function getPDS(shortDID) {
   const plcEntries = await resolvePlcDirectly(shortDID);
   for (let i = 0; i < plcEntries.length; i++) {
@@ -915,4 +952,38 @@ async function getPDS(shortDID) {
   }
 }
 
+
+
+const NOT_WORD_CHARACTERS_REGEX = /[^\w\d]+/g;
+
+/**
+ * @param {string} text
+ */
+function breakIntoWords(text) {
+  const words = text.split(NOT_WORD_CHARACTERS_REGEX);
+  const result = [];
+  for (const word of words) {
+    if (word.length >= 3 && word !== text) result.push(word);
+  }
+  return result;
+}
+
+/**
+ * @param {string | null | undefined} text
+ * @param {string[]} result
+ */
+export function populateWordLeads(text, result) {
+  if (!text) return result;
+
+  const words = text.split(NOT_WORD_CHARACTERS_REGEX);
+  for (const word of words) {
+    if (word.length < 3) continue;
+
+    const wLead = word.slice(0, 3).toLowerCase();
+    if (result.indexOf(wLead) < 0)
+      result.push(wLead);
+  }
+
+  return result;
+}
 

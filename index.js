@@ -98464,6 +98464,12 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
     register(ExtendedSearch);
   }
 
+  // node_modules/@mui/icons-material/esm/FavoriteBorder.js
+  var import_jsx_runtime45 = __toESM(require_jsx_runtime());
+  var FavoriteBorder_default = createSvgIcon(/* @__PURE__ */ (0, import_jsx_runtime45.jsx)("path", {
+    d: "M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3m-4.4 15.55-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05"
+  }), "FavoriteBorder");
+
   // src/api/record-cache.js
   var db = (
     /**
@@ -98600,7 +98606,7 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
               }
             }
             if (anyNew) {
-              sortResultsByText(results, text, words);
+              sortProfilesSearchByText(results, text, words);
             }
             streaming.yield(results, (buf2) => buf2 ? buf2.concat(results) : results);
           });
@@ -98648,6 +98654,105 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
     clearTimeout(debounceAccountsToStoreInCache);
     debounceAccountsToStoreInCache = /** @type {*} */
     setTimeout(cacheAccountsNow, 300);
+  }
+  function cacheAccountsNow() {
+    clearTimeout(maxDebounceAccountsToStoreInCache);
+    maxDebounceAccountsToStoreInCache = 0;
+    clearTimeout(debounceAccountsToStoreInCache);
+    debounceAccountsToStoreInCache = 0;
+    const accounts = Array.from(accountsToStoreInCacheByShortDID.values()).map((ac) => {
+      const wordLeads = [];
+      for (const w of breakIntoWords(ac.displayName + " " + ac.handle + " " + ac.description)) {
+        const wLead = w.slice(0, 3).toLowerCase();
+        if (wordLeads.indexOf(wLead) < 0)
+          wordLeads.push(wLead);
+      }
+      ac.w = wordLeads;
+      return ac;
+    });
+    accountsToStoreInCacheByShortDID.clear();
+    if (accounts.length) {
+      db.accounts.bulkPut(accounts);
+      console.log("adding accounts ", accounts.length, " to cache ", accounts);
+    }
+  }
+  function searchAccountsFromCache(text) {
+    const wordLeads = populateWordLeads(text, []);
+    return wordLeads.map((wLead) => __async(this, null, function* () {
+      const dbMatches = yield db.accounts.where("w").equals(wLead).toArray();
+      return dbMatches;
+    }));
+  }
+  function sortProfilesSearchByText(results, text, words) {
+    const resultsWithHandleJoin = results.map((r2) => {
+      const withHandleJoin = __spreadProps(__spreadValues({}, r2), { handlejoin: (r2.handle || "").replace(/[^\w\d]+/g, "").toLowerCase() });
+      return withHandleJoin;
+    });
+    const fuseKeyFields = new Fuse(resultsWithHandleJoin, {
+      keys: ["handle", "displayName", "description", "handlejoin"],
+      findAllMatches: true,
+      includeScore: true
+    });
+    const fuseAll = new Fuse(results, {
+      keys: ["handle", "displayName", "description"],
+      findAllMatches: true,
+      includeScore: true
+    });
+    const keyFieldsResults = fuseKeyFields.search(text);
+    const allResults = fuseAll.search(text);
+    const keyRankByShortDID = {};
+    for (const bestResult of keyFieldsResults) {
+      if (bestResult.score) {
+        const shortDID = shortenDID(bestResult.item.did);
+        keyRankByShortDID[shortDID] = bestResult.score;
+      }
+    }
+    const secondaryRankByShortDID = {};
+    for (const bestResult of allResults) {
+      if (bestResult.score) {
+        const shortDID = shortenDID(bestResult.item.did);
+        secondaryRankByShortDID[shortDID] = bestResult.score;
+      }
+    }
+    results.sort((p1, p2) => {
+      const shortDID1 = shortenDID(p1.did);
+      const shortDID2 = shortenDID(p2.did);
+      const keyRank1 = keyRankByShortDID[shortDID1];
+      const keyRank2 = keyRankByShortDID[shortDID2];
+      if (keyRank1 >= 0 && keyRank2 >= 0) {
+        if (keyRank1 !== keyRank2)
+          return keyRank1 - keyRank2;
+      }
+      const secondaryRank1 = secondaryRankByShortDID[shortDID1];
+      const secondaryRank2 = secondaryRankByShortDID[shortDID2];
+      if (secondaryRank1 >= 0 && secondaryRank2 >= 0) {
+        if (secondaryRank1 !== secondaryRank2)
+          return secondaryRank1 - secondaryRank2;
+      }
+      const hasRank1 = keyRank1 >= 0 || secondaryRank1 >= 0;
+      const hasRank2 = keyRank2 >= 0 || secondaryRank2 >= 0;
+      return (hasRank1 ? 0 : 1) - (hasRank2 ? 0 : 1);
+    });
+  }
+  function directSearchAccountsTypeahead(searchText) {
+    return __async(this, null, function* () {
+      var _a3;
+      const result = (_a3 = (yield publicAgent.searchActorsTypeahead({
+        q: searchText,
+        limit: 100
+      })).data) == null ? void 0 : _a3.actors;
+      return result;
+    });
+  }
+  function directSearchAccountsFull(searchText, limit) {
+    return __async(this, null, function* () {
+      var _a3;
+      const result = (_a3 = (yield publicAgent.searchActors({
+        q: searchText,
+        limit: limit || 100
+      })).data) == null ? void 0 : _a3.actors;
+      return result;
+    });
   }
   var postsToStoreInCacheByURI = /* @__PURE__ */ new Map();
   var likesToStoreInCacheByShortDIDAndURI = /* @__PURE__ */ new Map();
@@ -98811,128 +98916,6 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
       }
     }
     return textArray;
-  }
-  function cacheAccountsNow() {
-    clearTimeout(maxDebounceAccountsToStoreInCache);
-    maxDebounceAccountsToStoreInCache = 0;
-    clearTimeout(debounceAccountsToStoreInCache);
-    debounceAccountsToStoreInCache = 0;
-    const accounts = Array.from(accountsToStoreInCacheByShortDID.values()).map((ac) => {
-      const wordLeads = [];
-      for (const w of breakIntoWords(ac.displayName + " " + ac.handle + " " + ac.description)) {
-        const wLead = w.slice(0, 3).toLowerCase();
-        if (wordLeads.indexOf(wLead) < 0)
-          wordLeads.push(wLead);
-      }
-      ac.w = wordLeads;
-      return ac;
-    });
-    accountsToStoreInCacheByShortDID.clear();
-    if (accounts.length) {
-      db.accounts.bulkPut(accounts);
-      console.log("adding accounts ", accounts.length, " to cache ", accounts);
-    }
-  }
-  function searchAccountsFromCache(text) {
-    const wordLeads = populateWordLeads(text, []);
-    return wordLeads.map((wLead) => __async(this, null, function* () {
-      const dbMatches = yield db.accounts.where("w").equals(wLead).toArray();
-      return dbMatches;
-    }));
-  }
-  function sortResultsByText(results, text, words) {
-    const resultsWithHandleJoin = results.map((r2) => {
-      const withHandleJoin = __spreadProps(__spreadValues({}, r2), { handlejoin: (r2.handle || "").replace(/[^\w\d]+/g, "").toLowerCase() });
-      return withHandleJoin;
-    });
-    const fuseKeyFields = new Fuse(resultsWithHandleJoin, {
-      keys: ["handle", "displayName", "description", "handlejoin"],
-      findAllMatches: true,
-      includeScore: true
-    });
-    const fuseAll = new Fuse(results, {
-      keys: ["handle", "displayName", "description"],
-      findAllMatches: true,
-      includeScore: true
-    });
-    const keyFieldsResults = fuseKeyFields.search(text);
-    const allResults = fuseAll.search(text);
-    const keyRankByShortDID = {};
-    for (const bestResult of keyFieldsResults) {
-      if (bestResult.score) {
-        const shortDID = shortenDID(bestResult.item.did);
-        keyRankByShortDID[shortDID] = bestResult.score;
-      }
-    }
-    const secondaryRankByShortDID = {};
-    for (const bestResult of allResults) {
-      if (bestResult.score) {
-        const shortDID = shortenDID(bestResult.item.did);
-        secondaryRankByShortDID[shortDID] = bestResult.score;
-      }
-    }
-    results.sort((p1, p2) => {
-      const shortDID1 = shortenDID(p1.did);
-      const shortDID2 = shortenDID(p2.did);
-      const keyRank1 = keyRankByShortDID[shortDID1];
-      const keyRank2 = keyRankByShortDID[shortDID2];
-      if (keyRank1 >= 0 && keyRank2 >= 0) {
-        if (keyRank1 !== keyRank2)
-          return keyRank1 - keyRank2;
-      }
-      const secondaryRank1 = secondaryRankByShortDID[shortDID1];
-      const secondaryRank2 = secondaryRankByShortDID[shortDID2];
-      if (secondaryRank1 >= 0 && secondaryRank2 >= 0) {
-        if (secondaryRank1 !== secondaryRank2)
-          return secondaryRank1 - secondaryRank2;
-      }
-      const hasRank1 = keyRank1 >= 0 || secondaryRank1 >= 0;
-      const hasRank2 = keyRank2 >= 0 || secondaryRank2 >= 0;
-      return (hasRank1 ? 0 : 1) - (hasRank2 ? 0 : 1);
-    });
-  }
-  var NOT_WORD_CHARACTERS_REGEX = /[^\w\d]+/g;
-  function breakIntoWords(text) {
-    const words = text.split(NOT_WORD_CHARACTERS_REGEX);
-    const result = [];
-    for (const word of words) {
-      if (word.length >= 3 && word !== text)
-        result.push(word);
-    }
-    return result;
-  }
-  function directSearchAccountsTypeahead(searchText) {
-    return __async(this, null, function* () {
-      var _a3;
-      const result = (_a3 = (yield publicAgent.searchActorsTypeahead({
-        q: searchText,
-        limit: 100
-      })).data) == null ? void 0 : _a3.actors;
-      return result;
-    });
-  }
-  function directSearchAccountsFull(searchText, limit) {
-    return __async(this, null, function* () {
-      var _a3;
-      const result = (_a3 = (yield publicAgent.searchActors({
-        q: searchText,
-        limit: limit || 100
-      })).data) == null ? void 0 : _a3.actors;
-      return result;
-    });
-  }
-  function populateWordLeads(text, result) {
-    if (!text)
-      return result;
-    const words = text.split(NOT_WORD_CHARACTERS_REGEX);
-    for (const word of words) {
-      if (word.length < 3)
-        continue;
-      const wLead = word.slice(0, 3).toLowerCase();
-      if (result.indexOf(wLead) < 0)
-        result.push(wLead);
-    }
-    return result;
   }
   var allHistoryRecordTypes = (
     /** @type {const} */
@@ -99136,14 +99119,20 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
                 recordType === "app.bsky.feed.post" ? (r2) => {
                   const rec = r2.value;
                   rec.uri = r2.uri;
-                  storePostIndexToCache({
-                    uri: rec.uri,
-                    record: rec,
-                    author: {
-                      did: rec.repo
-                    },
-                    indexedAt: rec.createdAt
-                  });
+                  storePostIndexToCache(
+                    /** @type {import('@atproto/api/dist/client/types/app/bsky/feed/defs').PostView} */
+                    {
+                      uri: rec.uri,
+                      record: rec,
+                      author: (
+                        /** @type {ProfileView} */
+                        {
+                          did: rec.repo
+                        }
+                      ),
+                      indexedAt: rec.createdAt
+                    }
+                  );
                   return rec;
                 } : (r2) => r2.value
               );
@@ -99189,6 +99178,29 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
           return pdsEndpoint;
       }
     });
+  }
+  var NOT_WORD_CHARACTERS_REGEX = /[^\w\d]+/g;
+  function breakIntoWords(text) {
+    const words = text.split(NOT_WORD_CHARACTERS_REGEX);
+    const result = [];
+    for (const word of words) {
+      if (word.length >= 3 && word !== text)
+        result.push(word);
+    }
+    return result;
+  }
+  function populateWordLeads(text, result) {
+    if (!text)
+      return result;
+    const words = text.split(NOT_WORD_CHARACTERS_REGEX);
+    for (const word of words) {
+      if (word.length < 3)
+        continue;
+      const wLead = word.slice(0, 3).toLowerCase();
+      if (result.indexOf(wLead) < 0)
+        result.push(wLead);
+    }
+    return result;
   }
 
   // src/api/firehose-threads.js
@@ -99335,12 +99347,6 @@ Please use another name.` : (0, import_formatMuiErrorMessage.default)(18));
     rnd = rnd - Math.floor(rnd);
     return rnd;
   }
-
-  // node_modules/@mui/icons-material/esm/FavoriteBorder.js
-  var import_jsx_runtime45 = __toESM(require_jsx_runtime());
-  var FavoriteBorder_default = createSvgIcon(/* @__PURE__ */ (0, import_jsx_runtime45.jsx)("path", {
-    d: "M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3m-4.4 15.55-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05"
-  }), "FavoriteBorder");
 
   // coldsky/src/api/forAwait.js
   var import_react6 = __toESM(require_react());
